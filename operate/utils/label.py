@@ -133,6 +133,8 @@ def add_labels(base64_data, yolo_model):
     # Convert image to base64 for return
     buffered_labeled = io.BytesIO()
     image_labeled.save(buffered_labeled, format="PNG")  # I guess this is needed
+    with open("labeled_image.png", "wb") as f:
+        f.write(buffered_labeled.getvalue())
     img_base64_labeled = base64.b64encode(buffered_labeled.getvalue()).decode("utf-8")
 
     return img_base64_labeled, label_coordinates
@@ -158,3 +160,38 @@ def get_click_position_in_percent(coordinates, image_size):
     y_percent = y_center / image_size[1]
 
     return x_percent, y_percent
+
+
+def get_drag_drop_positions(start_label, end_label, label_coordinates, image_size):
+    """
+    Gets the start and end positions for a drag and drop operation using label IDs.
+    
+    Args:
+        start_label (str): The label ID for the starting element.
+        end_label (str): The label ID for the ending element.
+        label_coordinates (dict): Dictionary mapping label IDs to their coordinates.
+        image_size (tuple): A tuple of the image dimensions (width, height).
+        
+    Returns:
+        tuple: A tuple containing (start_x, start_y, end_x, end_y) as percentages.
+    """
+    if start_label not in label_coordinates or end_label not in label_coordinates:
+        return None
+    
+    start_coords = label_coordinates[start_label]
+    end_coords = label_coordinates[end_label]
+    
+    # Calculate the centers of the bounding boxes
+    start_x_center = (start_coords[0] + start_coords[2]) / 2
+    start_y_center = (start_coords[1] + start_coords[3]) / 2
+    
+    end_x_center = (end_coords[0] + end_coords[2]) / 2
+    end_y_center = (end_coords[1] + end_coords[3]) / 2
+    
+    # Convert to percentages
+    start_x_percent = start_x_center / image_size[0]
+    start_y_percent = start_y_center / image_size[1]
+    end_x_percent = end_x_center / image_size[0]
+    end_y_percent = end_y_center / image_size[1]
+    
+    return start_x_percent, start_y_percent, end_x_percent, end_y_percent

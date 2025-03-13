@@ -23,7 +23,7 @@ from operate.utils.label import (
     get_click_position_in_percent,
     get_label_coordinates,
 )
-from operate.utils.ocr import get_text_coordinates, get_text_element
+from operate.utils.ocr import get_text_coordinates, get_text_element, get_drag_drop_text_coordinates
 from operate.utils.screenshot import capture_screen_with_cursor, compress_screenshot
 from operate.utils.style import ANSI_BRIGHT_MAGENTA, ANSI_GREEN, ANSI_RED, ANSI_RESET
 
@@ -44,6 +44,9 @@ async def get_next_action(model, messages, objective, session_id):
         operation = await call_gpt_4o_labeled(messages, objective, model)
         return operation, None
     if model == "gpt-4-with-ocr":
+        operation = await call_gpt_4o_with_ocr(messages, objective, model)
+        return operation, None
+    if model == "gpt-4o-ocr-only":
         operation = await call_gpt_4o_with_ocr(messages, objective, model)
         return operation, None
     if model == "o1-with-ocr":
@@ -107,6 +110,7 @@ def call_gpt_4o(messages):
             messages=messages,
             presence_penalty=1,
             frequency_penalty=1,
+            temperature=0.1,
         )
 
         content = response.choices[0].message.content
@@ -349,6 +353,7 @@ async def call_gpt_4o_with_ocr(messages, objective, model):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
+            temperature=0.1,  # Lower temperature for more deterministic responses
         )
 
         content = response.choices[0].message.content
@@ -362,31 +367,36 @@ async def call_gpt_4o_with_ocr(messages, objective, model):
 
         processed_content = []
 
+        # Initialize EasyOCR Reader once for all operations
+        reader = easyocr.Reader(["en"])
+        # Read the screenshot once
+        ocr_result = reader.readtext(screenshot_filename)
+
         for operation in content:
             if operation.get("operation") == "click":
                 text_to_click = operation.get("text")
+                button = operation.get("button", "left")  # Get button type, default to left
+                
                 if config.verbose:
                     print(
                         "[call_gpt_4o_with_ocr][click] text_to_click",
                         text_to_click,
                     )
-                # Initialize EasyOCR Reader
-                reader = easyocr.Reader(["en"])
-
-                # Read the screenshot
-                result = reader.readtext(screenshot_filename)
-
+                
+                # Use LLM-assisted text element selection
                 text_element_index = get_text_element(
-                    result, text_to_click, screenshot_filename
+                    ocr_result, text_to_click, screenshot_filename, client=client
                 )
+                
                 coordinates = get_text_coordinates(
-                    result, text_element_index, screenshot_filename
+                    ocr_result, text_element_index, screenshot_filename
                 )
 
-                # add `coordinates`` to `content`
+                # add coordinates to operation
                 operation["x"] = coordinates["x"]
                 operation["y"] = coordinates["y"]
-
+                operation["button"] = button
+                
                 if config.verbose:
                     print(
                         "[call_gpt_4o_with_ocr][click] text_element_index",
@@ -402,6 +412,31 @@ async def call_gpt_4o_with_ocr(messages, objective, model):
                     )
                 processed_content.append(operation)
 
+            elif operation.get("operation") == "drag":
+                start_text = operation.get("start_text")
+                end_text = operation.get("end_text")
+                duration = operation.get("duration", 0.5)
+                
+                # Get drag and drop coordinates with LLM assistance
+                drag_drop_coords = get_drag_drop_text_coordinates(
+                    ocr_result, start_text, end_text, screenshot_filename, client=client
+                )
+                
+                # Add coordinates to operation
+                operation["start_x"] = drag_drop_coords["start_x"]
+                operation["start_y"] = drag_drop_coords["start_y"]
+                operation["end_x"] = drag_drop_coords["end_x"]
+                operation["end_y"] = drag_drop_coords["end_y"]
+                operation["duration"] = duration
+                
+                if config.verbose:
+                    print(
+                        "[call_gpt_4o_with_ocr][drag] coordinates",
+                        drag_drop_coords
+                    )
+                
+                processed_content.append(operation)
+
             else:
                 processed_content.append(operation)
 
@@ -413,12 +448,19 @@ async def call_gpt_4o_with_ocr(messages, objective, model):
 
     except Exception as e:
         print(
-            f"{ANSI_GREEN}[Self-Operating Computer]{ANSI_BRIGHT_MAGENTA}[{model}] That did not work. Trying another method {ANSI_RESET}"
+            f"{ANSI_GREEN}[Self-Operating Computer]{ANSI_RED}[{model}] OCR operation failed: {str(e)} {ANSI_RESET}"
         )
         if config.verbose:
             print("[Self-Operating Computer][Operate] error", e)
             traceback.print_exc()
-        return gpt_4_fallback(messages, objective, model)
+        
+        # Create a "done" operation with an error message instead of falling back to GPT-4
+        error_operation = [{
+            "operation": "done",
+            "summary": f"Operation failed due to OCR error: {str(e)}. Please try again or reformulate your request."
+        }]
+        
+        return error_operation
 
 
 async def call_o1_with_ocr(messages, objective, model):
@@ -763,6 +805,8 @@ async def call_claude_3_with_ocr(messages, objective, model):
     try:
         time.sleep(1)
         client = config.initialize_anthropic()
+        # Initialize OpenAI client for LLM-assisted OCR
+        openai_client = config.initialize_openai()
 
         confirm_system_prompt(messages, objective, model)
         screenshots_dir = "screenshots"
@@ -862,47 +906,74 @@ async def call_claude_3_with_ocr(messages, objective, model):
             print(
                 f"{ANSI_GREEN}[Self-Operating Computer]{ANSI_BRIGHT_MAGENTA}[{model}] content: {content} {ANSI_RESET}"
             )
+        
+        # Initialize EasyOCR Reader once for all operations
+        reader = easyocr.Reader(["en"])
+        # Read the screenshot once
+        ocr_result = reader.readtext(screenshot_filename)
+        
         processed_content = []
 
         for operation in content:
             if operation.get("operation") == "click":
                 text_to_click = operation.get("text")
+                button = operation.get("button", "left")  # Get button type, default to left
+                
                 if config.verbose:
                     print(
-                        "[call_claude_3_ocr][click] text_to_click",
+                        "[call_claude_3_with_ocr][click] text_to_click",
                         text_to_click,
                     )
-                # Initialize EasyOCR Reader
-                reader = easyocr.Reader(["en"])
-
-                # Read the screenshot
-                result = reader.readtext(screenshot_filename)
-
-                # limit the text to extract has a higher success rate
+                
+                # Use LLM-assisted text element selection
                 text_element_index = get_text_element(
-                    result, text_to_click[:3], screenshot_filename
+                    ocr_result, text_to_click, screenshot_filename, client=openai_client
                 )
+                
                 coordinates = get_text_coordinates(
-                    result, text_element_index, screenshot_filename
+                    ocr_result, text_element_index, screenshot_filename
                 )
-
-                # add `coordinates`` to `content`
+                
+                # add coordinates to operation
                 operation["x"] = coordinates["x"]
                 operation["y"] = coordinates["y"]
-
+                operation["button"] = button
+                
                 if config.verbose:
                     print(
-                        "[call_claude_3_ocr][click] text_element_index",
+                        "[call_claude_3_with_ocr][click] text_element_index",
                         text_element_index,
                     )
                     print(
-                        "[call_claude_3_ocr][click] coordinates",
+                        "[call_claude_3_with_ocr][click] coordinates",
                         coordinates,
                     )
+                
+                processed_content.append(operation)
+                    
+            elif operation.get("operation") == "drag":
+                start_text = operation.get("start_text")
+                end_text = operation.get("end_text")
+                duration = operation.get("duration", 0.5)
+                
+                # Get drag and drop coordinates with LLM assistance
+                drag_drop_coords = get_drag_drop_text_coordinates(
+                    ocr_result, start_text, end_text, screenshot_filename, client=openai_client
+                )
+                
+                # Add coordinates to operation
+                operation["start_x"] = drag_drop_coords["start_x"]
+                operation["start_y"] = drag_drop_coords["start_y"]
+                operation["end_x"] = drag_drop_coords["end_x"]
+                operation["end_y"] = drag_drop_coords["end_y"]
+                operation["duration"] = duration
+                
+                if config.verbose:
                     print(
-                        "[call_claude_3_ocr][click] final operation",
-                        operation,
+                        "[call_claude_3_with_ocr][drag] coordinates",
+                        drag_drop_coords
                     )
+                
                 processed_content.append(operation)
 
             else:

@@ -156,10 +156,27 @@ def operate(operations, model):
         elif operate_type == "click":
             x = operation.get("x")
             y = operation.get("y")
-            click_detail = {"x": x, "y": y}
+            button = operation.get("button", "left")  # Default to left click
+            click_detail = {"x": x, "y": y, "button": button}
             operate_detail = click_detail
 
             operating_system.mouse(click_detail)
+        elif operate_type == "drag":
+            start_x = operation.get("start_x")
+            start_y = operation.get("start_y")
+            end_x = operation.get("end_x")
+            end_y = operation.get("end_y")
+            duration = operation.get("duration", 0.5)
+            
+            operate_detail = {
+                "start_x": start_x, 
+                "start_y": start_y, 
+                "end_x": end_x, 
+                "end_y": end_y,
+                "duration": duration
+            }
+            
+            operating_system.drag_and_drop(start_x, start_y, end_x, end_y, duration)
         elif operate_type == "done":
             summary = operation.get("summary")
 
